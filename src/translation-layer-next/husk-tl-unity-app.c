@@ -45,6 +45,7 @@ static char g_geode_zip[1024], g_geode_launcher[1024];
 #include "husk-tl-vulkan.h"
 
 void tl_hle_set_ca_bundle(const char *path);
+void husk_release_unused_compressed_heap(void);
 extern int tl_log_sink_fd;
 
 enum { ENGINE_UNITY = 0, ENGINE_COCOS = 1, ENGINE_GAMEACTIVITY = 2, ENGINE_SDL = 3, ENGINE_UE4 = 4, ENGINE_GTA = 5, ENGINE_GODOT = 6, ENGINE_FLUTTER = 7, ENGINE_GAMEMAKER = 8, ENGINE_JAVA = 9 };
@@ -421,6 +422,12 @@ static void *launch_thread(void *arg)
             .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
         };
         tl_log_line("unity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
+        /* The 4 GiB, 4 GiB-aligned reservation taken with the JIT region (husk_prepare_compressed_heap) is for V8's and
+         * Dart's pointer-compression cage, which Unity never asks for. Kept, it is most of the address space an install
+         * without the extended-virtual-addressing entitlement has (a free Apple ID's): Granny: Legacy (Unity 2022.3) on an
+         * iPhone SE (2nd generation) was refused its first 256 MiB heap region at startup and crashed on the NULL. Given
+         * back before the engine reserves anything; an 8 GiB request, should one come, still finds its own (phantom_reserve). */
+        husk_release_unused_compressed_heap();
         tl_audio_install();
         ok = tl_unity_start(&cfg) && tl_unity_run();
     }
