@@ -93,8 +93,21 @@ static void where(char *out, size_t n, uintptr_t addr)
 {
     struct { uintptr_t addr; const char *name; uintptr_t off; } r = { addr, NULL, 0 };
     tl_ld_iterate(find_lib, &r);
-    if (r.name) snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off);
-    else snprintf(out, n, "%#lx", (unsigned long)addr);
+    if (r.name) { snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off); return; }
+    /* Not in a guest library: Husk's own code or a system library, which dyld knows. Without this a fault in a shim
+     * (bionic, JNI, GL) leaves only a bare address, which no build can be matched against (ASLR). */
+    Dl_info di;
+    if (addr && dladdr((void *)addr, &di) && di.dli_fname) {
+        const char *base = strrchr(di.dli_fname, '/');
+        base = base ? base + 1 : di.dli_fname;
+        if (di.dli_sname && di.dli_saddr)
+            snprintf(out, n, "%s+%#lx (%s+%#lx)", base, (unsigned long)(addr - (uintptr_t)di.dli_fbase), di.dli_sname,
+                     (unsigned long)(addr - (uintptr_t)di.dli_saddr));
+        else
+            snprintf(out, n, "%s+%#lx", base, (unsigned long)(addr - (uintptr_t)di.dli_fbase));
+        return;
+    }
+    snprintf(out, n, "%#lx", (unsigned long)addr);
 }
 
 static struct sigaction g_prev[32];
@@ -124,9 +137,13 @@ static void on_fatal(int sig, siginfo_t *info, void *uctx)
         if (f[0] <= fp) break;
         fp = f[0];
     }
-    for (int i = 0; i < 29; i += 4)
+    /* __x holds x0..x28 only; x29 (fp), x30 (lr), sp and pc are their own fields. Reading __x[29] went past the array, and
+     * x30 was printed as 0 even when the caller's address was there. */
+    for (int i = 0; i < 28; i += 4)
         tl_log_line("    x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx", i, uc->uc_mcontext->__ss.__x[i], i + 1, uc->uc_mcontext->__ss.__x[i + 1],
-                    i + 2, i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0ull, i + 3, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0ull);
+                    i + 2, uc->uc_mcontext->__ss.__x[i + 2], i + 3, uc->uc_mcontext->__ss.__x[i + 3]);
+    tl_log_line("    x28=%#llx fp=%#llx lr=%#llx sp=%#llx pc=%#llx", uc->uc_mcontext->__ss.__x[28], uc->uc_mcontext->__ss.__fp,
+                uc->uc_mcontext->__ss.__lr, uc->uc_mcontext->__ss.__sp, uc->uc_mcontext->__ss.__pc);
     if (g_prev[sig].sa_flags & SA_SIGINFO) {
         if (g_prev[sig].sa_sigaction) { g_prev[sig].sa_sigaction(sig, info, uctx); return; }
     } else if (g_prev[sig].sa_handler != SIG_DFL && g_prev[sig].sa_handler != SIG_IGN && g_prev[sig].sa_handler) {
