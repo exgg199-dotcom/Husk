@@ -150,9 +150,15 @@ struct GamePage: View {
     private var blockedBy: String? {
         if Router.shared.androidStarted { return "Android" }
         let apk = app.apks.first
-        guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }), loaded != apk else { return nil }
+        guard let loaded = husk_native_loaded_apk().map({ String(cString: $0) }) else { return nil }
+        if loaded == apk {
+            let state = husk_unity_state()
+            return state == Int32(HUSK_UNITY_ENDED) || state == Int32(HUSK_UNITY_FAILED) ? app.label : nil
+        }
         return Self.name(ofLoaded: loaded)
     }
+
+    private var blockedBySelf: Bool { blockedBy != nil && husk_native_loaded_apk().map({ String(cString: $0) }) == app.apks.first }
 
     private var compatSubject: CompatSubject? {
         app.packageName.map { CompatSubject(package: $0, name: app.label, isGame: LibraryItem.game(app).isGame, iconPath: app.iconPath) }
@@ -295,7 +301,11 @@ struct GamePage: View {
                 exit(0)
             }
         } message: {
-            Text("\(blockedBy ?? "The other game") is still loaded and only one game can run per session. Husk closes; open it again and \(app.label) starts by itself.")
+            if blockedBySelf {
+                Text("\(app.label) has ended and can start only once per session. Husk closes; open it again and \(app.label) starts by itself.")
+            } else {
+                Text("\(blockedBy ?? "The other game") is still loaded and only one game can run per session. Husk closes; open it again and \(app.label) starts by itself.")
+            }
         }
         .id(jit.attachGeneration)
         .onAppear {
