@@ -75,6 +75,12 @@ jobs:
             rm -rf package
             mkdir -p package/Payload
             cp -R "$APP_PATH" package/Payload/
+            PACKAGED_APP="package/Payload/$APP_NAME.app"
+            find "$PACKAGED_APP" -name "*.dylib" -not -path "*/Frameworks/*.framework/*" -exec codesign --force --sign - --timestamp=none {} \;
+            for framework in "$PACKAGED_APP"/Frameworks/*.framework; do [ -d "$framework" ] && codesign --force --sign - --timestamp=none "$framework"; done
+            for extension in "$PACKAGED_APP"/PlugIns/*.appex; do [ -d "$extension" ] && codesign --force --sign - --timestamp=none "$extension"; done
+            codesign --force --sign - --timestamp=none --entitlements src/app/Husk/Husk.entitlements "$PACKAGED_APP"
+            codesign -d --entitlements - "$PACKAGED_APP" | grep -q "get-task-allow"
             cd package
             zip -qry "../$APP_NAME.ipa" Payload
           } 2>&1 | tee "$LOG_DIRECTORY/package.log"
