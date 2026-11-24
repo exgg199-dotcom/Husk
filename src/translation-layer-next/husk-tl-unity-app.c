@@ -45,6 +45,7 @@ static char g_geode_zip[1024], g_geode_launcher[1024];
 #include "husk-tl-vulkan.h"
 
 void tl_hle_set_ca_bundle(const char *path);
+void husk_release_unused_compressed_heap(void);
 extern int tl_log_sink_fd;
 
 enum { ENGINE_UNITY = 0, ENGINE_COCOS = 1, ENGINE_GAMEACTIVITY = 2, ENGINE_SDL = 3, ENGINE_UE4 = 4, ENGINE_GTA = 5, ENGINE_GODOT = 6, ENGINE_FLUTTER = 7, ENGINE_GAMEMAKER = 8, ENGINE_JAVA = 9 };
@@ -93,8 +94,21 @@ static void where(char *out, size_t n, uintptr_t addr)
 {
     struct { uintptr_t addr; const char *name; uintptr_t off; } r = { addr, NULL, 0 };
     tl_ld_iterate(find_lib, &r);
-    if (r.name) snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off);
-    else snprintf(out, n, "%#lx", (unsigned long)addr);
+    if (r.name) { snprintf(out, n, "%s+%#lx", r.name, (unsigned long)r.off); return; }
+    /* Not in a guest library: Husk's own code or a system library, which dyld knows. Without this a fault in a shim
+     * (bionic, JNI, GL) leaves only a bare address, which no build can be matched against (ASLR). */
+    Dl_info di;
+    if (addr && dladdr((void *)addr, &di) && di.dli_fname) {
+        const char *base = strrchr(di.dli_fname, '/');
+        base = base ? base + 1 : di.dli_fname;
+        if (di.dli_sname && di.dli_saddr)
+            snprintf(out, n, "%s+%#lx (%s+%#lx)", base, (unsigned long)(addr - (uintptr_t)di.dli_fbase), di.dli_sname,
+                     (unsigned long)(addr - (uintptr_t)di.dli_saddr));
+        else
+            snprintf(out, n, "%s+%#lx", base, (unsigned long)(addr - (uintptr_t)di.dli_fbase));
+        return;
+    }
+    snprintf(out, n, "%#lx", (unsigned long)addr);
 }
 
 static struct sigaction g_prev[32];
@@ -124,9 +138,13 @@ static void on_fatal(int sig, siginfo_t *info, void *uctx)
         if (f[0] <= fp) break;
         fp = f[0];
     }
-    for (int i = 0; i < 29; i += 4)
+    /* __x holds x0..x28 only; x29 (fp), x30 (lr), sp and pc are their own fields. Reading __x[29] went past the array, and
+     * x30 was printed as 0 even when the caller's address was there. */
+    for (int i = 0; i < 28; i += 4)
         tl_log_line("    x%d=%#llx x%d=%#llx x%d=%#llx x%d=%#llx", i, uc->uc_mcontext->__ss.__x[i], i + 1, uc->uc_mcontext->__ss.__x[i + 1],
-                    i + 2, i + 2 < 29 ? uc->uc_mcontext->__ss.__x[i + 2] : 0ull, i + 3, i + 3 < 29 ? uc->uc_mcontext->__ss.__x[i + 3] : 0ull);
+                    i + 2, uc->uc_mcontext->__ss.__x[i + 2], i + 3, uc->uc_mcontext->__ss.__x[i + 3]);
+    tl_log_line("    x28=%#llx fp=%#llx lr=%#llx sp=%#llx pc=%#llx", uc->uc_mcontext->__ss.__x[28], uc->uc_mcontext->__ss.__fp,
+                uc->uc_mcontext->__ss.__lr, uc->uc_mcontext->__ss.__sp, uc->uc_mcontext->__ss.__pc);
     if (g_prev[sig].sa_flags & SA_SIGINFO) {
         if (g_prev[sig].sa_sigaction) { g_prev[sig].sa_sigaction(sig, info, uctx); return; }
     } else if (g_prev[sig].sa_handler != SIG_DFL && g_prev[sig].sa_handler != SIG_IGN && g_prev[sig].sa_handler) {
@@ -404,6 +422,12 @@ static void *launch_thread(void *arg)
             .metal_layer = A.layer, .angle_egl = A.angle, .angle_gles = NULL, .frame_dir = NULL, .frame_every = 0,
         };
         tl_log_line("unity: starting %s as %s, %dx%d", A.apk, A.package, A.width, A.height);
+        /* The 4 GiB, 4 GiB-aligned reservation taken with the JIT region (husk_prepare_compressed_heap) is for V8's and
+         * Dart's pointer-compression cage, which Unity never asks for. Kept, it is most of the address space an install
+         * without the extended-virtual-addressing entitlement has (a free Apple ID's): Granny: Legacy (Unity 2022.3) on an
+         * iPhone SE (2nd generation) was refused its first 256 MiB heap region at startup and crashed on the NULL. Given
+         * back before the engine reserves anything; an 8 GiB request, should one come, still finds its own (phantom_reserve). */
+        husk_release_unused_compressed_heap();
         tl_audio_install();
         ok = tl_unity_start(&cfg) && tl_unity_run();
     }

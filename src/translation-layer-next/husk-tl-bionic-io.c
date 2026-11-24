@@ -1225,9 +1225,13 @@ void husk_prepare_compressed_heap(void)
 void husk_release_unused_compressed_heap(void)
 {
     pthread_mutex_lock(&g_compressed_heap_lock);
-    if (g_compressed_heap && vm_deallocate(mach_task_self(), g_compressed_heap, PHANTOM_HALF) == KERN_SUCCESS)
+    bool released = false;
+    if (g_compressed_heap && vm_deallocate(mach_task_self(), g_compressed_heap, PHANTOM_HALF) == KERN_SUCCESS) {
         g_compressed_heap = 0;
+        released = true;
+    }
     pthread_mutex_unlock(&g_compressed_heap_lock);
+    if (released) tl_log_line("mm: gave back the unused 4 GiB reservation held for a pointer-compression cage");
 }
 static bool compressed_heap_request(size_t len)
 {
